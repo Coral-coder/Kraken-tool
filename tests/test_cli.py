@@ -52,3 +52,34 @@ def test_offline_gif_commands(tmp_path, capsys):
     capsys.readouterr()
     cli.main(["inspect-gif", str(out)])
     assert "All frames are full-canvas" in capsys.readouterr().out
+
+
+def test_fingerprint_interactive_run_and_report(monkeypatch, capsys, tmp_path):
+    from kraken_tool import fingerprint as F
+
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    log = tmp_path / "fp.jsonl"
+    # boot 1: odd columns fail; boot 2: even columns fail; boot 3 clean
+    boots = [
+        {"col1": "s", "col3": "s"},
+        {"col0": "n", "col2": "n", "liquid": "s"},
+        {},
+    ]
+    for i, bad in enumerate(boots):
+        fake = FakeKraken()
+        _patch(monkeypatch, fake)
+        answers = iter(bad.get(st.key, "" if st.kind == "tiles" else "y") for st in F.build_plan())
+        monkeypatch.setattr("builtins.input", lambda *_: next(answers))
+        rc = cli.main(["fingerprint", "--log", str(log), "--note", f"boot {i}"])
+        assert rc == (0 if not bad else 3)
+        # test assets used 3 non-overlapping buckets, then wiped
+        assert fake.buckets == {}
+        assert fake.mode[0] == P.LCD_MODE_LIQUID
+
+    out = capsys.readouterr().out
+    assert "half-word lane" in out
+    cli.main(["fingerprint", "--report", "--log", str(log)])
+    rep = capsys.readouterr().out
+    assert "3 run(s), 2 with a reproduced fault" in rep
+    assert "CHANGES between boots" in rep
+    assert "came up clean" in rep

@@ -32,6 +32,15 @@ class KrakenLcd:
             for i in range(P.BUCKET_COUNT)
         ]
 
+    def liquid_temperature(self) -> Optional[float]:
+        try:
+            msg = transact(self.t, P.packet(0x74, 0x01), sub=0x01)
+        except TransportError:
+            return None
+        if msg[15:17] == b"\xff\xff":
+            return None
+        return msg[15] + msg[16] / 10
+
     # ------------------------------------------------------------ controls
     def set_lcd(self, brightness: Optional[int] = None, orientation: Optional[int] = None) -> None:
         cur = self.lcd_info()
@@ -74,11 +83,13 @@ class KrakenLcd:
         return self.buckets()
 
     def upload(self, data_type: int, payload: bytes, *, bucket: int = 0, wipe_first: bool = True,
-               progress=None) -> None:
+               start_kb: int = 0, show: bool = True, progress=None) -> None:
         """Write one asset into a clean, non-overlapping bucket and display it.
 
         Unlike incremental allocators, this always starts from an empty table
-        and places the asset at offset 0, so overlap is impossible.
+        and places the asset at offset 0, so overlap is impossible.  With
+        ``wipe_first=False`` only the target bucket is replaced; the caller is
+        responsible for choosing a ``start_kb`` that does not overlap others.
         """
         size_kb = P.bucket_size_kb(len(payload))
         if size_kb > P.LCD_TOTAL_MEMORY_KB:
@@ -95,8 +106,9 @@ class KrakenLcd:
                 )
         else:
             self.cancel_transfers()
+            self.delete_bucket(bucket)
 
-        if not P.reply_ok(transact(self.t, P.req_create_bucket(bucket, 0, size_kb))):
+        if not P.reply_ok(transact(self.t, P.req_create_bucket(bucket, start_kb, size_kb))):
             raise TransportError("controller refused to create bucket")
 
         if not P.reply_ok(transact(self.t, P.req_start_transfer(bucket), sub=0x01)):
@@ -112,11 +124,11 @@ class KrakenLcd:
         except TransportError:
             log.warning("end-transfer not acknowledged; verifying via bucket table")
 
-        if not self.show_bucket(bucket):
-            raise TransportError("controller refused to display the uploaded asset")
-
         b = self.buckets()[bucket]
         if not b.occupied:
             raise TransportError(f"post-upload verification failed: bucket {bucket} is empty")
-        if b.start_kb != 0 or b.size_kb < size_kb:
-            log.warning("controller relocated asset: %s (requested 0+%d KiB)", b, size_kb)
+        if b.start_kb != start_kb or b.size_kb < size_kb:
+            log.warning("controller relocated asset: %s (requested %d+%d KiB)", b, start_kb, size_kb)
+
+        if show and not self.show_bucket(bucket):
+            raise TransportError("controller refused to display the uploaded asset")

@@ -9,8 +9,45 @@ NZXT CAM is installed. **CAM must be fully closed while you use it** (exit it fr
 
 ![symptom](docs/symptom-2026-11-21.jpg)
 
-*The symptom this tool was built for: in the moving region, the previous animation frame
-shows through in alternating columns, while the static parts of the image are sharp.*
+*The symptom this tool was built for: alternating columns keep showing the previous
+frame, and the pattern changes from boot to boot whatever image is loaded.*
+
+## Corruption that changes between reboots: `fingerprint`
+
+If the corruption changes from one boot to the next whatever image is loaded, the
+stored image is not the cause. Stale columns, where the old frame shows through every other
+pixel, mean that **some writes to the display's frame memory are not landing**. Static parts
+of a picture look clean only because the old and new content there are the same.
+
+The controller cannot report what the panel shows, so `fingerprint` turns your eyes into the
+sensor. It shows a known frame, switches to a test frame, and asks a yes/no question you can
+answer from arm's length:
+
+| Step | What it isolates |
+|---|---|
+| built-in temperature screen | whether the fault exists with no uploaded data at all |
+| white after black, black after white | whether full-screen updates leave stale content |
+| every 4th column lit, offsets 0-3 | **which pixel phase fails**. Even or odd columns only = one 16-bit half of the 32-bit frame-buffer data bus |
+| every 4th row lit, offsets 0-3 | the same for rows (in case the panel is rotated relative to memory) |
+| 16 numbered tiles | whether the fault is tied to an address range (region of the screen) |
+
+```text
+kraken-tool fingerprint --note "warm reboot"
+kraken-tool fingerprint --note "cold boot, PSU off 60s"
+kraken-tool fingerprint --note "SATA power moved to another PSU cable"
+kraken-tool fingerprint --report
+```
+
+Every run is logged with the firmware version and liquid temperature. `--report` compares runs:
+
+- **The same lane fails on every boot**: a physical fault in one data line (joint, trace or
+  memory chip). This needs a warranty repair.
+- **The failing lane changes between boots, or some boots are clean**: the lines work, but
+  the memory/display interface comes up marginally at power-up (timing calibration or supply
+  voltage during start-up). Changing the SATA power cable or rail, the USB header, cold
+  starts, or reinstalling firmware can fix this. The report tells you which change made the
+  difference.
+- **It tracks liquid temperature**: a thermally sensitive joint or component.
 
 ## Quick start
 
@@ -82,6 +119,8 @@ explicit confirmation prompts.
 list                      list connected Krakens
 doctor                    diagnose (exit code 2 = image table damaged)
 repair [FILE] [--raw]     full repair, optionally re-uploading FILE
+fingerprint [--note T]    guided test for boot-to-boot varying corruption (logged)
+fingerprint --report      cross-reboot analysis of all logged runs
 wipe                      delete every stored image; show liquid temperature
 pattern NAME              show one test pattern
 patterns [--only ...]     step through the test patterns interactively

@@ -261,6 +261,88 @@ def cmd_sanitize_gif(args):
     return 0
 
 
+def _ask(prompt, parser, help_text=""):
+    while True:
+        if help_text:
+            _print(help_text)
+        try:
+            ans = input("  > ")
+        except EOFError:
+            raise KeyboardInterrupt from None
+        val = parser(ans)
+        if val is not None:
+            return val
+        _print("  (didn't understand, try again)")
+
+
+def cmd_fingerprint(args):
+    import time
+
+    from . import fingerprint as F
+
+    log_path = Path(args.log) if args.log else F.default_log_path()
+    if args.report:
+        for line in F.cross_boot_analysis(F.load_log(log_path)):
+            _print(line)
+        _print()
+        _print(F.NEXT_STEPS)
+        _print(f"(log: {log_path})")
+        return 0
+
+    with open_device(args) as dev:
+        fw = str(dev.firmware())
+        temp = dev.liquid_temperature()
+        orient = dev.lcd_info().orientation_deg
+        res = dev.resolution
+        _print(f"{dev.name}, firmware {fw}, liquid {temp if temp is not None else '?'} °C")
+        _print("Look at the pump screen from about arm's length for each step.\n")
+
+        # reference frames live in buckets 0 and 1; tests go to bucket 2
+        ref_kb = P.bucket_size_kb(res[0] * res[1] * 4)
+        left = [b for b in dev.wipe() if b.occupied]
+        if left:
+            raise SystemExit(f"Could not clear buckets {[b.index for b in left]}; power-cycle and retry.")
+        dev.upload(P.DATA_TYPE_RGBA, encode_rgba(F.solid(res, "black"), res), bucket=0,
+                   wipe_first=False, start_kb=0, show=False)
+        dev.upload(P.DATA_TYPE_RGBA, encode_rgba(F.solid(res, "white"), res), bucket=1,
+                   wipe_first=False, start_kb=ref_kb, show=False)
+
+        answers = {}
+        try:
+            for i, step in enumerate(F.build_plan(), 1):
+                if step.make:
+                    dev.upload(P.DATA_TYPE_RGBA, encode_rgba(step.make(res), res), bucket=2,
+                               wipe_first=False, start_kb=2 * ref_kb, show=False)
+                if step.before == "liquid":
+                    dev.show_liquid()
+                else:
+                    dev.show_bucket(0 if step.before == "black" else 1)
+                    time.sleep(1.5)
+                    dev.show_bucket(2)
+                _print(f"[{i}] {step.prompt}")
+                if step.kind == "tiles":
+                    answers[step.key] = _ask(
+                        "", F.parse_tiles,
+                        "  Type the numbers of tiles that look striped/wrong (e.g. 1,2,5), or Enter if none.")
+                else:
+                    answers[step.key] = _ask("", F.parse_look, F.LOOK_HELP)
+        except KeyboardInterrupt:
+            _print("\nAborted; nothing logged.")
+            dev.wipe()
+            return 130
+        dev.wipe()
+
+    rec = F.make_record(answers, fw, temp, orient, args.note or "")
+    F.append_log(log_path, rec)
+    v = F.classify(answers)
+    _print("\n== Result for this boot ==")
+    _print(f"  {v.summary}")
+    for d in v.details:
+        _print(f"  - {d}")
+    _print(f"\nLogged to {log_path}. After a few reboots run: kraken-tool fingerprint --report")
+    return 0 if v.category == "clean" else 3
+
+
 # ---------------------------------------------------------------------- main
 
 def build_parser() -> argparse.ArgumentParser:
@@ -294,6 +376,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("file")
     s.add_argument("--raw", action="store_true", help="upload GIF as-is (skip sanitising)")
     s.set_defaults(fn=cmd_upload)
+
+    s = sub.add_parser("fingerprint",
+                       help="guided test that pinpoints boot-to-boot varying corruption")
+    s.add_argument("--note", help='what you did before this run, e.g. "cold boot, PSU off 60s"')
+    s.add_argument("--report", action="store_true", help="analyse all logged runs across reboots")
+    s.add_argument("--log", help="log file (default: per-user app data)")
+    s.set_defaults(fn=cmd_fingerprint)
 
     sub.add_parser("liquid", help="show liquid temperature").set_defaults(fn=cmd_liquid)
     s = sub.add_parser("brightness", help="set LCD brightness")
