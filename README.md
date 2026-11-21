@@ -109,7 +109,7 @@ pytest                      # includes a behavioural simulator of the controller
 python packaging/build.py   # single-file binary via PyInstaller
 ```
 
-Releases are built by GitHub Actions when you push a `v*` tag.
+Releases are built by GitHub Actions: bump `__version__` in `src/kraken_tool/__init__.py` and push to `main`; the workflow tags and publishes `v<version>` with Windows, Linux and macOS binaries.
 
 Protocol knowledge comes from the [liquidctl](https://github.com/liquidctl/liquidctl) project's
 reverse-engineering notes. Licensed GPL-3.0-or-later.

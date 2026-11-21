@@ -1,6 +1,7 @@
 name: Release
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -8,7 +9,29 @@ permissions:
   contents: write
 
 jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.v.outputs.tag }}
+      publish: ${{ steps.v.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        run: |
+          ver=$(grep -oP '__version__ = "\K[^"]+' src/kraken_tool/__init__.py)
+          tag="v$ver"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null && [ "${GITHUB_REF}" != "refs/tags/$tag" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"   # already released; bump __version__ to release again
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
   build:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
     strategy:
       matrix:
         os: [windows-latest, ubuntu-22.04, macos-latest]
@@ -30,9 +53,8 @@ jobs:
           path: dist/*
 
   release:
-    needs: build
+    needs: [version, build]
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -42,5 +64,8 @@ jobs:
       - run: cp packaging/71-kraken-tool.rules dist/
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: kraken-tool ${{ needs.version.outputs.tag }}
           files: dist/*
           generate_release_notes: true
