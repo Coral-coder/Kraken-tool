@@ -1,3 +1,3 @@
 """Diagnose and repair the LCD controller of NZXT Kraken Elite coolers."""
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"

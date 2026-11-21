@@ -64,7 +64,7 @@ class FakeKraken:
             self._reply(0x33, 0x01, ok=ok)
         elif (c, s) == (0x32, 0x02):
             i = report[2]
-            ok = i not in self.stuck
+            ok = i not in self.stuck and self.mode != (P.LCD_MODE_BUCKET, i)
             if ok:
                 self.buckets.pop(i, None)
             self._reply(0x33, 0x02, ok=ok)

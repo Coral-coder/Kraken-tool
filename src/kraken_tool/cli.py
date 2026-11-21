@@ -297,7 +297,7 @@ def cmd_fingerprint(args):
         _print(f"{dev.name}, firmware {fw}, liquid {temp if temp is not None else '?'} °C")
         _print("Look at the pump screen from about arm's length for each step.\n")
 
-        # reference frames live in buckets 0 and 1; tests go to bucket 2
+        # reference frames live in buckets 0 and 1; tests alternate between buckets 2 and 3
         ref_kb = P.bucket_size_kb(res[0] * res[1] * 4)
         left = [b for b in dev.wipe() if b.occupied]
         if left:
@@ -310,15 +310,16 @@ def cmd_fingerprint(args):
         answers = {}
         try:
             for i, step in enumerate(F.build_plan(), 1):
+                tb = 2 + i % 2  # alternate test buckets: never overwrite the one on screen
                 if step.make:
-                    dev.upload(P.DATA_TYPE_RGBA, encode_rgba(step.make(res), res), bucket=2,
-                               wipe_first=False, start_kb=2 * ref_kb, show=False)
+                    dev.upload(P.DATA_TYPE_RGBA, encode_rgba(step.make(res), res), bucket=tb,
+                               wipe_first=False, start_kb=tb * ref_kb, show=False)
                 if step.before == "liquid":
                     dev.show_liquid()
                 else:
                     dev.show_bucket(0 if step.before == "black" else 1)
                     time.sleep(1.5)
-                    dev.show_bucket(2)
+                    dev.show_bucket(tb)
                 _print(f"[{i}] {step.prompt}")
                 if step.kind == "tiles":
                     answers[step.key] = _ask(

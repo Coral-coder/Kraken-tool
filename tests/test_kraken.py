@@ -154,3 +154,12 @@ def test_sanitize_gif_produces_full_opaque_frames():
     img = Image.open(io.BytesIO(clean))
     img.seek(3)
     assert img.convert("RGB").getpixel((56, 32))[0] > 200
+
+
+def test_replacing_displayed_bucket_switches_away_first():
+    fake = FakeKraken()
+    dev = KrakenLcd(fake)
+    dev.upload(P.DATA_TYPE_RGBA, b"\1" * 4096)  # bucket 0, now on screen
+    dev.upload(P.DATA_TYPE_RGBA, b"\2" * 4096, wipe_first=False)  # replace it in place
+    assert fake.written[0][20:] == b"\2" * 4096
+    assert fake.mode == (P.LCD_MODE_BUCKET, 0)

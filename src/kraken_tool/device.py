@@ -106,7 +106,11 @@ class KrakenLcd:
                 )
         else:
             self.cancel_transfers()
-            self.delete_bucket(bucket)
+            if not self.delete_bucket(bucket):
+                # the controller refuses to delete the bucket it is displaying
+                self.show_liquid()
+                if not self.delete_bucket(bucket) and self.buckets()[bucket].occupied:
+                    raise TransportError(f"controller refused to delete bucket {bucket}")
 
         if not P.reply_ok(transact(self.t, P.req_create_bucket(bucket, start_kb, size_kb))):
             raise TransportError("controller refused to create bucket")
