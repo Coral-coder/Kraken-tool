@@ -200,6 +200,52 @@ def cmd_repair(args):
     return 0
 
 
+def cmd_cycle(args):
+    from . import cycle as C
+    from .transport import enumerate_devices
+
+    devs = [d for d in enumerate_devices() if not args.serial or d.serial == args.serial]
+    if len(devs) != 1:
+        raise SystemExit("Need exactly one Kraken connected (use --serial). Is NZXT CAM closed?")
+    entry = devs[0]
+
+    reset = None
+    if not args.no_usb_reset:
+        if sys.platform == "win32" and not C._is_windows_admin():
+            _print("Note: not running as Administrator, so the USB reset (the part closest to a")
+            _print("reboot) will be skipped. For the full cycle: right-click PowerShell >")
+            _print("'Run as administrator' and run this command again.\n")
+        else:
+            def reset():
+                what = C.usb_reset(entry.product_id, entry.serial)
+                C.wait_for_device(enumerate_devices, entry.serial)
+                return what
+
+    total = 0
+    for batch in range(1, args.max_batches + 1):
+        _print(f"Running {args.rounds} reset rounds (batch {batch}/{args.max_batches})...")
+        C.run_rounds(args.rounds, lambda: open_device(args), reset,
+                     lambda i, msg: _print(f"  round {i:2d}/{args.rounds}: {msg}"))
+        total += args.rounds
+        _print("\nThe pump is now showing its built-in temperature screen.")
+        try:
+            ans = input("Does it look clean (no stripes, no ghosting)? [y/n] > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _print()
+            return 130
+        if ans.startswith("y"):
+            _print(f"\nFixed after {total} rounds. Reopen NZXT CAM to restore your image/GIF and")
+            _print("cooling profile. If it comes back after a later boot, just run this again.")
+            return 0
+        if batch < args.max_batches:
+            _print("OK, trying another batch.\n")
+
+    _print(f"\nStill corrupted after {total} rounds. The software resets aren't enough this time:")
+    _print("  - do a warm reboot (that fixed it before), or a cold boot with the PSU off for 60 s;")
+    _print("  - if it keeps happening, run `fingerprint` on a bad boot and send the --report.")
+    return 3
+
+
 def cmd_liquid(args):
     with open_device(args) as dev:
         dev.show_liquid()
@@ -384,6 +430,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--report", action="store_true", help="analyse all logged runs across reboots")
     s.add_argument("--log", help="log file (default: per-user app data)")
     s.set_defaults(fn=cmd_fingerprint)
+
+    s = sub.add_parser("cycle",
+                       help="re-run the Kraken side of a reboot N times, then ask if the screen is fixed")
+    s.add_argument("--rounds", type=int, default=10, help="resets per batch (default 10)")
+    s.add_argument("--max-batches", type=int, default=3, help="batches before giving up (default 3)")
+    s.add_argument("--no-usb-reset", action="store_true", help="skip the USB device reset")
+    s.set_defaults(fn=cmd_cycle)
 
     sub.add_parser("liquid", help="show liquid temperature").set_defaults(fn=cmd_liquid)
     s = sub.add_parser("brightness", help="set LCD brightness")

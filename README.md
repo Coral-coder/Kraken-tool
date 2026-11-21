@@ -12,6 +12,26 @@ NZXT CAM is installed. **CAM must be fully closed while you use it** (exit it fr
 *The symptom this tool was built for: alternating columns keep showing the previous
 frame, and the pattern changes from boot to boot whatever image is loaded.*
 
+## Quick fix for start-up corruption: `cycle`
+
+If the screen comes up corrupted but a reboot or two fixes it, the display interface is
+starting up marginally. `cycle` repeats the Kraken's side of a reboot without rebooting the PC:
+
+1. a USB device reset (so the controller re-enumerates, as during a warm reboot);
+2. the start-up commands CAM sends at boot;
+3. a full LCD reconfiguration (backlight off, rotate away and back, restore).
+
+It runs 10 rounds, then asks whether the built-in temperature screen looks clean. If not, it
+runs another batch (up to 3). Run it from an **Administrator** PowerShell so the USB reset is
+included; without admin rights it still does steps 2 and 3.
+
+```text
+.\kraken-tool-win32-amd64.exe cycle
+.\kraken-tool-win32-amd64.exe cycle --rounds 20 --max-batches 5
+```
+
+Afterwards, reopen NZXT CAM to restore your image and cooling profile.
+
 ## Corruption that changes between reboots: `fingerprint`
 
 If the corruption changes from one boot to the next whatever image is loaded, the
@@ -119,6 +139,7 @@ explicit confirmation prompts.
 list                      list connected Krakens
 doctor                    diagnose (exit code 2 = image table damaged)
 repair [FILE] [--raw]     full repair, optionally re-uploading FILE
+cycle [--rounds N]        redo the Kraken side of a reboot N times, then ask
 fingerprint [--note T]    guided test for boot-to-boot varying corruption (logged)
 fingerprint --report      cross-reboot analysis of all logged runs
 wipe                      delete every stored image; show liquid temperature

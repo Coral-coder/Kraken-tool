@@ -83,3 +83,48 @@ def test_fingerprint_interactive_run_and_report(monkeypatch, capsys, tmp_path):
     assert "3 run(s), 2 with a reproduced fault" in rep
     assert "CHANGES between boots" in rep
     assert "came up clean" in rep
+
+
+def _cycle_env(monkeypatch, answers):
+    import kraken_tool.transport as T
+    from kraken_tool import cycle as C
+
+    fake = FakeKraken(brightness=70, orientation=1)
+    _patch(monkeypatch, fake)
+    entry = T.DeviceEntry(0x300C, "Fake", (640, 640), "SER1", b"p")
+    monkeypatch.setattr(T, "enumerate_devices", lambda: [entry])
+    resets = []
+    monkeypatch.setattr(C, "usb_reset", lambda pid, ser: resets.append((pid, ser)) or "USB port reset")
+    monkeypatch.setattr(C, "wait_for_device", lambda *a, **k: entry)
+    monkeypatch.setattr(C, "_is_windows_admin", lambda: True)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    it = iter(answers)
+    monkeypatch.setattr("builtins.input", lambda *_: next(it))
+    return fake, resets
+
+
+def test_cycle_runs_rounds_then_asks(monkeypatch, capsys):
+    fake, resets = _cycle_env(monkeypatch, ["y"])
+    assert cli.main(["cycle"]) == 0
+    assert len(resets) == 10
+    out = capsys.readouterr().out
+    assert "round 10/10" in out and "Fixed after 10 rounds" in out
+    # brightness and orientation restored, built-in screen shown
+    assert (fake.brightness, fake.orientation) == (70, 1)
+    assert fake.mode[0] == P.LCD_MODE_LIQUID
+    # each round rotated away and back with the backlight off
+    sets = [r for r in fake.log if r[:2] == b"\x30\x02"]
+    assert len(sets) == 30 and sets[0][3] == 0 and sets[0][7] == 2
+
+
+def test_cycle_gives_up_after_max_batches(monkeypatch, capsys):
+    fake, resets = _cycle_env(monkeypatch, ["n", "n"])
+    assert cli.main(["cycle", "--rounds", "3", "--max-batches", "2"]) == 3
+    assert len(resets) == 6
+    assert "Still corrupted after 6 rounds" in capsys.readouterr().out
+
+
+def test_cycle_without_usb_reset(monkeypatch):
+    fake, resets = _cycle_env(monkeypatch, ["y"])
+    assert cli.main(["cycle", "--no-usb-reset", "--rounds", "2"]) == 0
+    assert resets == []
