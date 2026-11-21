@@ -12,6 +12,20 @@ NZXT CAM is installed. **CAM must be fully closed while you use it** (exit it fr
 *The symptom this tool was built for: alternating columns keep showing the previous
 frame, and the pattern changes from boot to boot whatever image is loaded.*
 
+## One-click fix
+
+Download `kraken-tool-win32-amd64.exe` and **double-click it**. With no arguments it runs
+`fix`, which:
+
+1. asks for administrator rights (one UAC prompt), needed for the USB reset;
+2. closes NZXT CAM if it is running;
+3. runs 10 reset rounds (see `cycle` below) without asking anything;
+4. reopens NZXT CAM, which restores your image and cooling profile;
+5. closes its window after 20 s.
+
+The controller cannot report what the panel shows, so `fix` cannot confirm the result itself.
+If the screen is still corrupted, run it again or do a warm reboot.
+
 ## Quick fix for start-up corruption: `cycle`
 
 If the screen comes up corrupted but a reboot or two fixes it, the display interface is
@@ -139,6 +153,7 @@ explicit confirmation prompts.
 list                      list connected Krakens
 doctor                    diagnose (exit code 2 = image table damaged)
 repair [FILE] [--raw]     full repair, optionally re-uploading FILE
+fix [--rounds N]          automatic: elevate, close CAM, reset N times, reopen CAM
 cycle [--rounds N]        redo the Kraken side of a reboot N times, then ask
 fingerprint [--note T]    guided test for boot-to-boot varying corruption (logged)
 fingerprint --report      cross-reboot analysis of all logged runs

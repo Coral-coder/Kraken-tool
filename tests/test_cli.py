@@ -128,3 +128,51 @@ def test_cycle_without_usb_reset(monkeypatch):
     fake, resets = _cycle_env(monkeypatch, ["y"])
     assert cli.main(["cycle", "--no-usb-reset", "--rounds", "2"]) == 0
     assert resets == []
+
+
+def _fix_env(monkeypatch, admin=True, cam=("C:/Program Files/NZXT CAM/NZXT CAM.exe",)):
+    from kraken_tool import autofix as A
+
+    fake, resets = _cycle_env(monkeypatch, [])
+    events = []
+    monkeypatch.setattr(A, "is_admin", lambda: admin)
+    monkeypatch.setattr(A, "find_cam", lambda: list(cam))
+    monkeypatch.setattr(A, "close_cam", lambda: events.append("close"))
+    monkeypatch.setattr(A, "reopen_cam", lambda p: events.append(("reopen", p)))
+    monkeypatch.setattr(A, "relaunch_elevated", lambda a: events.append(("elevate", a)) or True)
+    monkeypatch.setattr(A, "timed_pause", lambda *a: events.append("pause"))
+    monkeypatch.setattr("builtins.input", lambda *_: (_ for _ in ()).throw(AssertionError("asked")))
+    return fake, resets, events
+
+
+def test_bare_launch_runs_fix_without_questions(monkeypatch, capsys):
+    fake, resets, events = _fix_env(monkeypatch)
+    assert cli.main([]) == 0
+    assert len(resets) == 10
+    assert events[0] == "close" and events[1][0] == "reopen" and events[-1] == "pause"
+    assert (fake.brightness, fake.orientation) == (70, 1)
+    assert "round 10/10" in capsys.readouterr().out
+
+
+def test_fix_elevates_on_windows_when_not_admin(monkeypatch):
+    fake, resets, events = _fix_env(monkeypatch, admin=False)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
+    assert cli.main(["fix", "--pause"]) == 0
+    assert events == [("elevate", ["fix", "--rounds", "10", "--pause"])]
+    assert resets == []  # work happens in the elevated copy
+
+
+def test_fix_reopens_cam_even_on_error(monkeypatch, capsys):
+    from kraken_tool import cycle as C
+
+    fake, resets, events = _fix_env(monkeypatch)
+    monkeypatch.setattr(C, "run_rounds", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    assert cli.main(["fix"]) == 1
+    assert ("reopen", ["C:/Program Files/NZXT CAM/NZXT CAM.exe"]) in events
+    assert "boom" in capsys.readouterr().out
+
+
+def test_fix_without_cam_running(monkeypatch):
+    fake, resets, events = _fix_env(monkeypatch, cam=())
+    assert cli.main(["fix", "--rounds", "2"]) == 0
+    assert events == [] and len(resets) == 2

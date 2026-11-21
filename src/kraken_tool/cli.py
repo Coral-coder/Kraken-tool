@@ -246,6 +246,57 @@ def cmd_cycle(args):
     return 3
 
 
+def cmd_fix(args):
+    from . import autofix as A
+    from . import cycle as C
+    from .transport import enumerate_devices
+
+    _print(f"kraken-tool {__version__}: automatic display fix\n")
+    admin = A.is_admin()
+    if sys.platform == "win32" and not admin and not args.no_elevate:
+        fwd = ["fix", "--rounds", str(args.rounds)] + (["--keep-cam"] if args.keep_cam else []) \
+            + (["--pause"] if args.pause else [])
+        _print("Asking Windows for administrator rights (needed for the USB reset)...")
+        if A.relaunch_elevated(fwd):
+            return 0  # the elevated copy carries on in its own window
+        _print("Administrator rights declined; continuing without the USB reset.\n")
+
+    rc = 0
+    cam = [] if args.keep_cam else A.find_cam()
+    if cam:
+        _print("Closing NZXT CAM (it will be reopened afterwards)...")
+        A.close_cam()
+    try:
+        entry = A.wait_for_kraken(enumerate_devices)
+        if entry is None:
+            _print("No Kraken found. Check the pump's internal USB cable.")
+            rc = 1
+        else:
+            args.serial = entry.serial
+            reset = None
+            if admin:
+                def reset():
+                    what = C.usb_reset(entry.product_id, entry.serial)
+                    C.wait_for_device(enumerate_devices, entry.serial)
+                    return what
+            _print(f"Found {entry.name}. Running {args.rounds} reset rounds...")
+            C.run_rounds(args.rounds, lambda: open_device(args), reset,
+                         lambda i, msg: _print(f"  round {i:2d}/{args.rounds}: {msg}"))
+            _print("\nDone. The display path has been re-initialised "
+                   f"{args.rounds} times.")
+            _print("If the screen is still corrupted, run this again or do a warm reboot.")
+    except Exception as e:  # noqa: BLE001 - always reopen CAM and report
+        _print(f"\nerror: {e}")
+        rc = 1
+    finally:
+        if cam:
+            _print("Reopening NZXT CAM...")
+            A.reopen_cam(cam)
+    if args.pause:
+        A.timed_pause(20, _print)
+    return rc
+
+
 def cmd_liquid(args):
     with open_device(args) as dev:
         dev.show_liquid()
@@ -431,6 +482,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--log", help="log file (default: per-user app data)")
     s.set_defaults(fn=cmd_fingerprint)
 
+    s = sub.add_parser("fix", help="automatic fix (default when launched without arguments)")
+    s.add_argument("--rounds", type=int, default=10, help="reset rounds (default 10)")
+    s.add_argument("--keep-cam", action="store_true", help="don't close/reopen NZXT CAM")
+    s.add_argument("--no-elevate", action="store_true", help="don't ask for admin rights")
+    s.add_argument("--pause", action="store_true", help="keep the window open briefly at the end")
+    s.set_defaults(fn=cmd_fix)
+
     s = sub.add_parser("cycle",
                        help="re-run the Kraken side of a reboot N times, then ask if the screen is fixed")
     s.add_argument("--rounds", type=int, default=10, help="resets per batch (default 10)")
@@ -459,6 +517,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv=None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if not argv:  # double-clicked / launched bare: just fix it
+        argv = ["fix", "--pause"]
     args = build_parser().parse_args(argv)
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.WARNING,
