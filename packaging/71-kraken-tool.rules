@@ -1,0 +1,4 @@
+# NZXT Kraken Elite / Kraken 2023-2024: allow logged-in users to access HID + bulk interfaces.
+# Install: sudo cp 71-kraken-tool.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEMS=="usb", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c|300e|3012|3014", TAG+="uaccess"
+KERNEL=="hidraw*", ATTRS{idVendor}=="1e71", ATTRS{idProduct}=="300c|300e|3012|3014", TAG+="uaccess"

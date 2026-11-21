@@ -1,0 +1,338 @@
+"""kraken-tool command line interface."""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from contextlib import contextmanager
+from pathlib import Path
+
+from . import __version__
+from . import protocol as P
+from .images import PATTERNS, encode_rgba, gif_frame_report, make_pattern, sanitize_gif
+
+SYMBOL = {"ok": "[ OK ]", "warn": "[WARN]", "error": "[FAIL]"}
+
+
+def _print(msg=""):
+    print(msg, flush=True)
+
+
+@contextmanager
+def open_device(args):
+    from .device import KrakenLcd
+    from .transport import UsbTransport, enumerate_devices
+
+    devs = enumerate_devices()
+    if args.serial:
+        devs = [d for d in devs if d.serial == args.serial]
+    if not devs:
+        raise SystemExit(
+            "No Kraken Elite found. Check the internal USB cable, quit NZXT CAM completely "
+            "(tray icon too), and on Linux install packaging/71-kraken-tool.rules."
+        )
+    if len(devs) > 1:
+        raise SystemExit("Several Krakens found; pick one with --serial (see `kraken-tool list`).")
+    d = devs[0]
+    t = UsbTransport(d)
+    try:
+        yield KrakenLcd(t, d.resolution, d.name)
+    finally:
+        t.close()
+
+
+def _progress(done, total):
+    pct = done * 100 // total
+    sys.stdout.write(f"\r  uploading... {pct:3d}%")
+    sys.stdout.flush()
+    if done >= total:
+        sys.stdout.write("\n")
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_list(args):
+    from .transport import enumerate_devices
+
+    devs = enumerate_devices()
+    if not devs:
+        _print("No supported NZXT Kraken found.")
+        return 1
+    for d in devs:
+        _print(f"{d.name}  pid={d.product_id:#06x}  lcd={d.resolution[0]}x{d.resolution[1]}  serial={d.serial}")
+    return 0
+
+
+def _report(dev) -> list[P.Finding]:
+    fw = dev.firmware()
+    lcd = dev.lcd_info()
+    buckets = dev.buckets()
+    _print(f"Device      : {dev.name}")
+    _print(f"Firmware    : {fw}")
+    _print(f"LCD         : {dev.resolution[0]}x{dev.resolution[1]}, brightness {lcd.brightness}%, "
+           f"orientation {lcd.orientation_deg}°")
+    _print("Asset memory:")
+    used = [b for b in buckets if b.occupied]
+    if not used:
+        _print("  (empty)")
+    for b in used:
+        _print(f"  bucket {b.index:2d}: asset {b.asset:3d}  {b.start_kb:6d}-{b.end_kb:<6d} KiB "
+               f"({b.size_kb} KiB)")
+    _print(f"  capacity {P.LCD_TOTAL_MEMORY_KB} KiB")
+    findings = P.analyse_buckets(buckets)
+    if lcd.orientation_deg == -1:
+        findings.append(P.Finding("error", "LCD orientation register holds an invalid value"))
+    if lcd.brightness > 100:
+        findings.append(P.Finding("error", f"LCD brightness register holds invalid value {lcd.brightness}"))
+    _print("\nDiagnosis:")
+    for f in findings:
+        _print(f"  {SYMBOL[f.severity]} {f.message}")
+    return findings
+
+
+def cmd_doctor(args):
+    with open_device(args) as dev:
+        findings = _report(dev)
+    bad = any(f.severity == "error" for f in findings)
+    _print()
+    if bad:
+        _print("The stored image table is damaged. Run `kraken-tool repair` to rebuild it.")
+    else:
+        _print("Image memory looks consistent. Next step to isolate the fault:")
+        _print("  kraken-tool patterns      # cycle hardware test patterns on the panel")
+        _print("See README 'Reading the results' to interpret what you see.")
+    return 2 if bad else 0
+
+
+def cmd_wipe(args):
+    with open_device(args) as dev:
+        left = [b for b in dev.wipe() if b.occupied]
+    if left:
+        _print(f"Could not clear buckets {[b.index for b in left]}. Power-cycle the pump and retry.")
+        return 2
+    _print("All stored LCD images deleted; display switched to liquid temperature.")
+    return 0
+
+
+def _upload_pattern(dev, name, orientation):
+    img = make_pattern(name, dev.resolution)
+    dev.upload(P.DATA_TYPE_RGBA, encode_rgba(img, dev.resolution, 0))
+
+
+def cmd_pattern(args):
+    with open_device(args) as dev:
+        _upload_pattern(dev, args.name, 0)
+    _print(f"Showing '{args.name}': {PATTERNS[args.name][1]}")
+    return 0
+
+
+def cmd_patterns(args):
+    names = args.only or list(PATTERNS)
+    with open_device(args) as dev:
+        for n in names:
+            _upload_pattern(dev, n, 0)
+            _print(f"\n[{n}] {PATTERNS[n][1]}")
+            try:
+                input("  Look at the pump screen, then press Enter for the next pattern (Ctrl+C to stop) ")
+            except (KeyboardInterrupt, EOFError):
+                _print()
+                break
+        dev.wipe()
+    _print("Done; display returned to liquid temperature.")
+    return 0
+
+
+def _prepare_file(path: Path, resolution, orientation, raw: bool):
+    with open(path, "rb") as fh:
+        head = fh.read(6)
+    if head[:3] == b"GIF":
+        data = path.read_bytes() if raw else sanitize_gif(path, resolution, orientation)
+        return P.DATA_TYPE_GIF, data
+    from PIL import Image
+
+    return P.DATA_TYPE_RGBA, encode_rgba(Image.open(path), resolution, orientation)
+
+
+def cmd_upload(args):
+    path = Path(args.file)
+    with open_device(args) as dev:
+        orient = dev.lcd_info().orientation_deg
+        orient = orient if orient in P.ORIENTATIONS else 0
+        kind, data = _prepare_file(path, dev.resolution, orient, args.raw)
+        _print(f"Uploading {'GIF' if kind == P.DATA_TYPE_GIF else 'image'} "
+               f"({len(data) / 1024:.0f} KiB) to a clean bucket...")
+        dev.upload(kind, data, progress=_progress)
+    _print("Uploaded and verified.")
+    return 0
+
+
+def cmd_repair(args):
+    with open_device(args) as dev:
+        _print("== 1/4 current state ==")
+        _report(dev)
+        _print("\n== 2/4 resetting controller state ==")
+        dev.cancel_transfers()
+        lcd = dev.lcd_info()
+        dev.set_lcd(
+            brightness=lcd.brightness if 0 <= lcd.brightness <= 100 else 80,
+            orientation=lcd.orientation_deg if lcd.orientation_deg in P.ORIENTATIONS else 0,
+        )
+        _print("\n== 3/4 wiping LCD asset memory ==")
+        left = [b for b in dev.wipe(passes=3) if b.occupied]
+        if left:
+            _print(f"  {SYMBOL['error']} buckets {[b.index for b in left]} survive deletion.")
+            _print("  Power-cycle: shut down, switch the PSU off for 30 s, boot, run repair again.")
+            return 2
+        _print(f"  {SYMBOL['ok']} asset memory empty")
+        _print("\n== 4/4 restoring display ==")
+        if args.file:
+            orient = dev.lcd_info().orientation_deg
+            kind, data = _prepare_file(Path(args.file), dev.resolution,
+                                       orient if orient in P.ORIENTATIONS else 0, args.raw)
+            dev.upload(kind, data, wipe_first=False, progress=_progress)
+            _print(f"  {SYMBOL['ok']} re-uploaded {args.file} (sanitised, full-frame)")
+        else:
+            dev.show_liquid()
+            _print(f"  {SYMBOL['ok']} showing liquid temperature (no file given)")
+    _print("\nRepair complete. If artifacts remain on the *liquid temperature* screen or on")
+    _print("`kraken-tool patterns`, the fault is below the image memory: see README.")
+    return 0
+
+
+def cmd_liquid(args):
+    with open_device(args) as dev:
+        dev.show_liquid()
+    return 0
+
+
+def cmd_brightness(args):
+    with open_device(args) as dev:
+        dev.set_lcd(brightness=args.value)
+    return 0
+
+
+def cmd_orientation(args):
+    with open_device(args) as dev:
+        dev.set_lcd(orientation=args.degrees)
+    return 0
+
+
+def cmd_firmware(args):
+    with open_device(args) as dev:
+        fw = dev.firmware()
+    _print(f"Installed controller firmware: {fw}")
+    _print(
+        "\nkraken-tool does not write the controller's program flash. NZXT's bootloader\n"
+        "protocol and signed firmware images are not public, and a bad write bricks the\n"
+        "pump (it is also the pump's speed controller). To reflash official firmware:\n"
+        "  1. Run `kraken-tool wipe` first (clears the image memory CAM keeps re-using).\n"
+        "  2. Open NZXT CAM > your Kraken > Settings (gear) > Firmware > Update/Reinstall.\n"
+        "  3. Do not let the PC sleep or unplug USB during the update.\n"
+        "  4. Close CAM fully, then run `kraken-tool doctor` to confirm a clean state."
+    )
+    return 0
+
+
+def cmd_inspect_gif(args):
+    rows = gif_frame_report(args.file)
+    risky = 0
+    for r in rows:
+        flags = []
+        if not r["full_canvas"]:
+            flags.append("partial-frame")
+        if r["transparency"]:
+            flags.append("transparency")
+        if r["disposal"] not in (0, 1, 2):
+            flags.append(f"disposal={r['disposal']}")
+        risky += bool(flags)
+        _print(f"frame {r['frame']:3d} box={r['box']} disposal={r['disposal']} "
+               f"{'  <- ' + ', '.join(flags) if flags else ''}")
+    _print(f"\n{risky}/{len(rows)} frames use delta/transparency tricks that the Kraken's decoder"
+           " can render as ghosting." if risky else "\nAll frames are full-canvas and opaque.")
+    return 0
+
+
+def cmd_sanitize_gif(args):
+    size = (args.size, args.size)
+    data = sanitize_gif(args.input, size)
+    Path(args.output).write_bytes(data)
+    _print(f"Wrote {args.output} ({len(data) / 1024:.0f} KiB, {size[0]}x{size[1]}, full-frame)")
+    return 0
+
+
+# ---------------------------------------------------------------------- main
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="kraken-tool",
+        description="Diagnose and repair the LCD controller of NZXT Kraken Elite coolers.",
+    )
+    p.add_argument("--version", action="version", version=f"kraken-tool {__version__}")
+    p.add_argument("-v", "--verbose", action="store_true", help="log USB traffic")
+    p.add_argument("--serial", help="select device by serial number")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("list", help="list connected Krakens").set_defaults(fn=cmd_list)
+    sub.add_parser("doctor", help="read firmware, LCD state and image memory; diagnose").set_defaults(fn=cmd_doctor)
+    sub.add_parser("wipe", help="delete every stored LCD image").set_defaults(fn=cmd_wipe)
+
+    s = sub.add_parser("repair", help="full repair: reset LCD state, wipe image memory, restore display")
+    s.add_argument("file", nargs="?", help="image or GIF to put back after the repair")
+    s.add_argument("--raw", action="store_true", help="upload GIF as-is (skip sanitising)")
+    s.set_defaults(fn=cmd_repair)
+
+    s = sub.add_parser("pattern", help="show one hardware test pattern")
+    s.add_argument("name", choices=list(PATTERNS))
+    s.set_defaults(fn=cmd_pattern)
+
+    s = sub.add_parser("patterns", help="step through all test patterns interactively")
+    s.add_argument("--only", nargs="+", choices=list(PATTERNS))
+    s.set_defaults(fn=cmd_patterns)
+
+    s = sub.add_parser("upload", help="upload an image or GIF (GIFs are sanitised)")
+    s.add_argument("file")
+    s.add_argument("--raw", action="store_true", help="upload GIF as-is (skip sanitising)")
+    s.set_defaults(fn=cmd_upload)
+
+    sub.add_parser("liquid", help="show liquid temperature").set_defaults(fn=cmd_liquid)
+    s = sub.add_parser("brightness", help="set LCD brightness")
+    s.add_argument("value", type=int, choices=range(0, 101), metavar="0-100")
+    s.set_defaults(fn=cmd_brightness)
+    s = sub.add_parser("orientation", help="set LCD orientation")
+    s.add_argument("degrees", type=int, choices=P.ORIENTATIONS)
+    s.set_defaults(fn=cmd_orientation)
+    sub.add_parser("firmware", help="show firmware version and how to reflash it").set_defaults(fn=cmd_firmware)
+
+    s = sub.add_parser("inspect-gif", help="(offline) check a GIF for decoder-hostile frames")
+    s.add_argument("file")
+    s.set_defaults(fn=cmd_inspect_gif)
+    s = sub.add_parser("sanitize-gif", help="(offline) re-encode a GIF as full opaque frames")
+    s.add_argument("input")
+    s.add_argument("output")
+    s.add_argument("--size", type=int, default=640)
+    s.set_defaults(fn=cmd_sanitize_gif)
+    return p
+
+
+def main(argv=None) -> int:
+    args = build_parser().parse_args(argv)
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+    try:
+        return args.fn(args) or 0
+    except KeyboardInterrupt:
+        return 130
+    except Exception as e:  # noqa: BLE001
+        from .transport import TransportError
+
+        if args.verbose or not isinstance(e, (TransportError, ValueError, OSError)):
+            raise
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
